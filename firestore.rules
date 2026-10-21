@@ -1,0 +1,131 @@
+rules_version = '2';
+
+// Phân quyền:
+// - super admin (superAdminEmail): toàn quyền, cấp/gỡ admin và nhân viên.
+// - admin: có members/{email} với role 'admin', toàn quyền dữ liệu,
+//   chỉ cấp/gỡ và phân cơ sở cho nhân viên (role 'staff').
+// - nhân viên: members/{email} với role 'staff', chỉ đọc/ghi dữ liệu thuộc
+//   các cơ sở trong trường sites.
+// Phải khớp với lib/auth/access.dart (superAdminEmail).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function email() {
+      return request.auth.token.email;
+    }
+
+    function isVerified() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isSuperAdmin() {
+      return isVerified() && email() == 'nguyenducthang.it190801@gmail.com';
+    }
+
+    function memberRole() {
+      return get(/databases/(default)/documents/members/$(email())).data.role;
+    }
+
+    function isAdmin() {
+      return isVerified()
+        && exists(/databases/(default)/documents/members/$(email()))
+        && memberRole() == 'admin';
+    }
+
+    // Toàn quyền dữ liệu: super admin hoặc admin.
+    function hasFullAccess() {
+      return isSuperAdmin() || isAdmin();
+    }
+
+    function isStaff() {
+      return isVerified()
+        && exists(/databases/(default)/documents/members/$(email()))
+        && memberRole() == 'staff';
+    }
+
+    function staffSites() {
+      return get(/databases/(default)/documents/members/$(email())).data.sites;
+    }
+
+    function canSite(siteId) {
+      return hasFullAccess() || (isStaff() && siteId in staffSites());
+    }
+
+    // Phòng có thuộc cơ sở được phép không (dùng cho dữ liệu gắn với room_id).
+    function canRoom(roomId) {
+      return canSite(get(/databases/(default)/documents/rooms/$(roomId)).data.site_id);
+    }
+
+    match /members/{memberEmail} {
+      allow read: if hasFullAccess() || (isVerified() && email() == memberEmail);
+      // Super admin cấp được mọi vai trò; admin chỉ cấp/gỡ nhân viên.
+      allow create: if isSuperAdmin()
+        || (isAdmin() && request.resource.data.role == 'staff');
+      // Admin chỉ sửa/xóa nhân viên, không đụng vào admin khác.
+      allow update: if isSuperAdmin()
+        || (isAdmin() && resource.data.role == 'staff'
+            && request.resource.data.role == 'staff');
+      allow delete: if isSuperAdmin()
+        || (isAdmin() && resource.data.role == 'staff');
+    }
+
+    match /sites/{siteId} {
+      allow read: if hasFullAccess() || (isStaff() && siteId in staffSites());
+      allow create, update, delete: if hasFullAccess();
+    }
+
+    match /rooms/{roomId} {
+      allow read, update, delete: if canSite(resource.data.site_id);
+      allow create: if canSite(request.resource.data.site_id);
+    }
+
+    match /services/{serviceId} {
+      allow read, update, delete: if canSite(resource.data.site_id);
+      allow create: if canSite(request.resource.data.site_id);
+    }
+
+    match /room_services/{id} {
+      allow read, update, delete: if canRoom(resource.data.room_id);
+      allow create: if canRoom(request.resource.data.room_id);
+    }
+
+    match /contracts/{id} {
+      allow read, update, delete: if canRoom(resource.data.room_id);
+      allow create: if canRoom(request.resource.data.room_id);
+    }
+
+    match /meter_readings/{id} {
+      allow read, update, delete: if canRoom(resource.data.room_id);
+      allow create: if canRoom(request.resource.data.room_id);
+    }
+
+    match /invoices/{id} {
+      allow read, update, delete: if canSite(resource.data.site_id);
+      allow create: if canSite(request.resource.data.site_id);
+    }
+
+    // Người thuê không thuộc cơ sở cụ thể: nhân viên được xem và thêm, chỉ admin sửa/xóa.
+    match /tenants/{id} {
+      allow read, create: if hasFullAccess() || isStaff();
+      allow update, delete: if hasFullAccess();
+    }
+
+    // Ảnh nén (kiểm tra phòng, thanh lý, chứng từ thu tiền): theo cơ sở; chỉ admin sửa/xóa.
+    match /photos/{id} {
+      allow read: if canSite(resource.data.site_id);
+      allow create: if canSite(request.resource.data.site_id);
+      allow update, delete: if hasFullAccess();
+    }
+
+    // Chi phí: chỉ super admin đọc và ghi.
+    match /expenses/{id} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    // Nhật ký: nhân viên được ghi hành động, chỉ admin đọc.
+    match /activity/{id} {
+      allow create: if hasFullAccess() || isStaff();
+      allow read, update, delete: if hasFullAccess();
+    }
+  }
+}
